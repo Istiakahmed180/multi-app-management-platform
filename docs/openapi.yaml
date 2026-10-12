@@ -1,0 +1,1121 @@
+openapi: 3.1.0
+info:
+  title: App Management Platform API
+  version: 0.1.0
+  description: |
+    Multi-tenant API for managing Flutter apps: organizations, apps, remote configuration,
+    feature flags, app users, push campaigns, releases, analytics and audit logs.
+
+    **Authentication**
+    - *Dashboard (cookieAuth)*: `POST /auth/login` sets HttpOnly `amp_at` (access, 15 min) and
+      `amp_rt` (refresh, 7 days, path `/api/v1/auth`) cookies plus a readable `amp_csrf` cookie.
+      Every POST/PUT/PATCH/DELETE must send the CSRF token in `X-CSRF-Token`
+      (returned in the body of login, refresh and `/auth/me`).
+    - *Server ingest (apiKeyAuth)*: `Authorization: Bearer amk_…` per-app server API key.
+    - *Public*: no authentication; read-only, rate limited, `appKey` identifies but never authorizes.
+
+    **Tenancy**: apps are always resolved server-side; their organization is never taken from the
+    client. Apps and organizations the caller cannot access return `404`. Missing permissions on an
+    accessible resource return `403`. The required permission is listed as `x-permission`.
+
+    **Envelope**: success `{ "data": …, "meta"?: PageMeta }`; error `{ "error": Error }`.
+servers:
+  - url: /api/v1
+tags:
+  - name: Health
+  - name: Auth
+  - name: Organizations
+  - name: Invitations
+  - name: Apps
+  - name: Configurations
+  - name: Public
+  - name: Feature flags
+  - name: App users
+  - name: Ingest
+  - name: Campaigns
+  - name: Releases
+  - name: Analytics
+  - name: Integrations
+  - name: Audit logs
+
+security:
+  - cookieAuth: []
+
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Readiness (database connectivity)
+      security: []
+      responses:
+        '200': { description: "Healthy", content: { application/json: { schema: { $ref: '#/components/schemas/HealthEnvelope' } } } }
+        '503': { description: "Database unavailable", content: { application/json: { schema: { $ref: '#/components/schemas/HealthEnvelope' } } } }
+  /health/live:
+    get:
+      tags: [Health]
+      summary: Liveness
+      security: []
+      responses:
+        '200': { description: "Process is up" }
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Sign in (rate limited, account lockout after repeated failures)
+      security: []
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/LoginRequest' } } }
+      responses:
+        '200': { description: "Signed in; session cookies set", content: { application/json: { schema: { $ref: '#/components/schemas/ProfileEnvelope' } } } }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '423': { description: "Account temporarily locked", content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } } }
+        '429': { $ref: '#/components/responses/RateLimited' }
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Rotate access and refresh tokens using the refresh cookie
+      description: Reusing an already-rotated refresh token (outside a 30 s concurrency window) revokes the session.
+      security: [{ refreshCookie: [] }]
+      responses:
+        '200':
+          description: Rotated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: object, properties: { csrfToken: { type: string }, accessExpiresAt: { type: string, format: date-time } } }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Revoke the current session and clear cookies
+      parameters: [{ $ref: '#/components/parameters/Csrf' }]
+      responses:
+        '200': { description: "Logged out" }
+        '403': { $ref: '#/components/responses/CsrfFailed' }
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Current admin, organizations with role and permissions, and CSRF token
+      responses:
+        '200': { description: "Profile", content: { application/json: { schema: { $ref: '#/components/schemas/ProfileEnvelope' } } } }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+    patch:
+      tags: [Auth]
+      summary: Update display name
+      parameters: [{ $ref: '#/components/parameters/Csrf' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [name], additionalProperties: false, properties: { name: { type: string, minLength: 1, maxLength: 120 } } } } } }
+      responses:
+        '200': { description: "Updated admin" }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+  /auth/change-password:
+    post:
+      tags: [Auth]
+      summary: Change password; revokes all other sessions
+      parameters: [{ $ref: '#/components/parameters/Csrf' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword, newPassword]
+              additionalProperties: false
+              properties:
+                currentPassword: { type: string }
+                newPassword: { type: string, minLength: 12, maxLength: 256 }
+      responses:
+        '200': { description: 'Changed: `{ changed: true, revokedSessions: n }`' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+  /auth/sessions:
+    get:
+      tags: [Auth]
+      summary: List active sessions for the current admin
+      responses:
+        '200': { description: "Sessions", content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: '#/components/schemas/SessionInfo' } } } } } } }
+  /auth/sessions/{sessionId}:
+    delete:
+      tags: [Auth]
+      summary: Revoke one of your sessions
+      parameters: [{ $ref: '#/components/parameters/Csrf' }, { name: sessionId, in: path, required: true, schema: { $ref: '#/components/schemas/ObjectId' } }]
+      responses:
+        '200': { description: "Revoked" }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /auth/sessions/revoke-others:
+    post:
+      tags: [Auth]
+      summary: Revoke all sessions except the current one
+      parameters: [{ $ref: '#/components/parameters/Csrf' }]
+      responses:
+        '200': { description: '`{ revoked: n }`' }
+
+  /overview:
+    get:
+      tags: [Analytics]
+      summary: Dashboard overview across accessible apps (optionally one organization)
+      parameters: [{ name: orgId, in: query, schema: { $ref: '#/components/schemas/ObjectId' } }]
+      responses:
+        '200': { description: 'Apps, users, activity (with `available` flag), API metrics (24h), campaigns, app health, recent audit activity' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /organizations:
+    get:
+      tags: [Organizations]
+      summary: Organizations the caller can access (super admins see all)
+      parameters: [{ $ref: '#/components/parameters/Page' }, { $ref: '#/components/parameters/PageSize' }, { name: search, in: query, schema: { type: string, maxLength: 100 } }]
+      responses:
+        '200': { description: "Page of organizations with role, permissions and app count", content: { application/json: { schema: { $ref: '#/components/schemas/PagedEnvelope' } } } }
+    post:
+      tags: [Organizations]
+      summary: Create an organization; the caller becomes its owner
+      parameters: [{ $ref: '#/components/parameters/Csrf' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [name], additionalProperties: false, properties: { name: { type: string, minLength: 2, maxLength: 120 }, slug: { $ref: '#/components/schemas/Slug' } } } } } }
+      responses:
+        '201': { description: "Created" }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+  /organizations/{orgId}:
+    parameters: [{ $ref: '#/components/parameters/OrgId' }]
+    get:
+      tags: [Organizations]
+      summary: Organization details with app/member counts and caller permissions
+      x-permission: org:read
+      responses:
+        '200': { description: "Organization" }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Organizations]
+      summary: Rename organization
+      x-permission: org:manage
+      parameters: [{ $ref: '#/components/parameters/Csrf' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [name], additionalProperties: false, properties: { name: { type: string, minLength: 2, maxLength: 120 } } } } } }
+      responses:
+        '200': { description: "Updated" }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /organizations/{orgId}/members:
+    parameters: [{ $ref: '#/components/parameters/OrgId' }]
+    get:
+      tags: [Organizations]
+      summary: List members
+      x-permission: members:read
+      parameters:
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/PageSize' }
+        - { name: search, in: query, schema: { type: string } }
+        - { name: role, in: query, schema: { $ref: '#/components/schemas/OrgRole' } }
+      responses:
+        '200': { description: "Page of members", content: { application/json: { schema: { $ref: '#/components/schemas/PagedEnvelope' } } } }
+  /organizations/{orgId}/members/{memberId}:
+    parameters: [{ $ref: '#/components/parameters/OrgId' }, { name: memberId, in: path, required: true, schema: { $ref: '#/components/schemas/ObjectId' } }]
+    patch:
+      tags: [Organizations]
+      summary: Change role and/or app scope (the last owner cannot be demoted)
+      x-permission: members:manage
+      parameters: [{ $ref: '#/components/parameters/Csrf' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                role: { $ref: '#/components/schemas/OrgRole' }
+                appIds: { type: array, items: { $ref: '#/components/schemas/ObjectId' }, description: 'App scope for app_admin/support_agent; empty = all apps' }
+      responses:
+        '200': { description: "Updated membership" }
+        '400': { description: "appIds reference apps outside the organization" }
+        '409': { $ref: '#/components/responses/Conflict' }
+    delete:
+      tags: [Organizations]
+      summary: Remove member (the last owner cannot be removed)
+      x-permission: members:manage
+      parameters: [{ $ref: '#/components/parameters/Csrf' }]
+      responses:
+        '200': { description: "Removed" }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /organizations/{orgId}/invitations:
+    parameters: [{ $ref: '#/components/parameters/OrgId' }]
+    get:
+      tags: [Organizations]
+      summary: Pending invitations
+      x-permission: members:read
+      responses:
+        '200': { description: "Invitations" }
+    post:
+      tags: [Organizations]
+      summary: Invite a member. The one-time token is returned once (no email provider is wired in).
+      x-permission: members:manage
+      parameters: [{ $ref: '#/components/parameters/Csrf' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, role]
+              additionalProperties: false
+              properties:
+                email: { type: string, format: email }
+                role: { $ref: '#/components/schemas/OrgRole' }
+                appIds: { type: array, items: { $ref: '#/components/schemas/ObjectId' } }
+      responses:
+        '201': { description: '`{ invitation, inviteToken, inviteUrl }`' }
+        '409': { description: "Already a member" }
+  /organizations/{orgId}/invitations/{invitationId}:
+    delete:
+      tags: [Organizations]
+      summary: Revoke an invitation
+      x-permission: members:manage
+      parameters: [{ $ref: '#/components/parameters/Csrf' }, { $ref: '#/components/parameters/OrgId' }, { name: invitationId, in: path, required: true, schema: { $ref: '#/components/schemas/ObjectId' } }]
+      responses:
+        '200': { description: "Revoked" }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /organizations/{orgId}/audit-logs:
+    get:
+      tags: [Audit logs]
+      summary: Organization audit trail (app-scoped members only see their apps)
+      x-permission: audit:read
+      parameters:
+        - { $ref: '#/components/parameters/OrgId' }
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/PageSize' }
+        - { name: action, in: query, description: Action prefix, schema: { type: string } }
+        - { name: actorEmail, in: query, description: Email prefix, schema: { type: string } }
+        - { name: targetType, in: query, schema: { type: string } }
+        - { name: appId, in: query, schema: { $ref: '#/components/schemas/ObjectId' } }
+        - { name: from, in: query, schema: { type: string, format: date-time } }
+        - { name: to, in: query, schema: { type: string, format: date-time } }
+      responses:
+        '200': { description: "Page of audit entries", content: { application/json: { schema: { $ref: '#/components/schemas/PagedEnvelope' } } } }
+
+  /invitations/{token}:
+    get:
+      tags: [Invitations]
+      summary: Preview an invitation
+      security: []
+      parameters: [{ name: token, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: '`{ email, role, organization: { name }, accountExists, expiresAt }`' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /invitations/accept:
+    post:
+      tags: [Invitations]
+      summary: Accept an invitation
+      description: New people supply `name` and `password` (an account and session are created). Existing accounts must be signed in as the invited email.
+      security: [{}, { cookieAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              additionalProperties: false
+              properties:
+                token: { type: string }
+                name: { type: string }
+                password: { type: string, minLength: 12 }
+      responses:
+        '200': { description: '`{ orgId, role, createdAccount, csrfToken? }`' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /apps:
+    get:
+      tags: [Apps]
+      summary: Apps the caller can access
+      x-permission: apps:read
+      parameters:
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/PageSize' }
+        - { name: orgId, in: query, schema: { $ref: '#/components/schemas/ObjectId' } }
+        - { name: search, in: query, description: "Name, slug or package id", schema: { type: string } }
+        - { name: status, in: query, description: Defaults to excluding archived, schema: { $ref: '#/components/schemas/AppStatus' } }
+        - { name: platform, in: query, schema: { $ref: '#/components/schemas/Platform' } }
+        - { name: environment, in: query, schema: { $ref: '#/components/schemas/Environment' } }
+        - { name: sort, in: query, schema: { type: string, enum: [name, -name, createdAt, -createdAt, updatedAt, -updatedAt], default: name } }
+      responses:
+        '200': { description: "Page of apps", content: { application/json: { schema: { $ref: '#/components/schemas/PagedEnvelope' } } } }
+    post:
+      tags: [Apps]
+      summary: Register an app (creates a default draft configuration and a public appKey)
+      x-permission: apps:create (in orgId)
+      parameters: [{ $ref: '#/components/parameters/Csrf' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AppCreate' } } } }
+      responses:
+        '201': { description: "Created", content: { application/json: { schema: { type: object, properties: { data: { $ref: '#/components/schemas/App' } } } } } }
+        '404': { description: "Organization not found or not accessible" }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+  /apps/{appId}:
+    parameters: [{ $ref: '#/components/parameters/AppId' }]
+    get:
+      tags: [Apps]
+      summary: App details, integration summary and the caller's permissions
+      x-permission: apps:read
+      responses:
+        '200': { description: "App" }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Apps]
+      summary: Update app metadata
+      x-permission: apps:write
+      parameters: [{ $ref: '#/components/parameters/Csrf' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AppUpdate' } } } }
+      responses:
+        '200': { description: "Updated" }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+  /apps/{appId}/status:
+    patch:
+      tags: [Apps]
+      summary: Change status. Inactive/archived apps stop serving public config; archived apps reject ingest.
+      x-permission: apps:write
+      parameters: [{ $ref: '#/components/parameters/AppId' }, { $ref: '#/components/parameters/Csrf' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [status], additionalProperties: false, properties: { status: { $ref: '#/components/schemas/AppStatus' }, reason: { type: string, maxLength: 500 } } } } } }
+      responses:
+        '200': { description: "Updated" }
+  /apps/{appId}/assets/presign:
+    post:
+      tags: [Apps]
+      summary: Presigned S3 PUT URL for an image (server-generated key, 5 MB max)
+      x-permission: apps:write
+      parameters: [{ $ref: '#/components/parameters/AppId' }, { $ref: '#/components/parameters/Csrf' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fileName, contentType, contentLength, purpose]
+              properties:
+                fileName: { type: string }
+                contentType: { type: string, enum: [image/png, image/jpeg, image/webp, image/gif] }
+                contentLength: { type: integer, maximum: 5242880 }
+                purpose: { type: string, enum: [icon, banner, onboarding, logo, notification] }
+      responses:
+        '200': { description: '`{ uploadUrl, publicUrl, key, expiresIn, headers }`' }
+        '503': { description: "Object storage not configured", content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } } }
+
+  /apps/{appId}/configs:
+    get:
+      tags: [Configurations]
+      summary: Draft, current published version and paginated version history
+      x-permission: config:read
+      parameters: [{ $ref: '#/components/parameters/AppId' }, { $ref: '#/components/parameters/Page' }, { $ref: '#/components/parameters/PageSize' }]
+      responses:
+        '200': { description: '`{ draft: { content, updatedAt, updatedBy, baseVersion, hasUnpublishedChanges }, current, versions[] }` + meta' }
+  /apps/{appId}/configs/versions/{version}:
+    get:
+      tags: [Configurations]
+      summary: Full content of a published version
+      x-permission: config:read
+      parameters: [{ $ref: '#/components/parameters/AppId' }, { name: version, in: path, required: true, schema: { type: integer, minimum: 1 } }]
+      responses:
+        '200': { description: "Version" }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /apps/{appId}/configs/draft:
+    put:
+      tags: [Configurations]
+      summary: Replace the draft (strictly validated; optional optimistic concurrency)
+      x-permission: config:write
+      parameters: [{ $ref: '#/components/parameters/AppId' }, { $ref: '#/components/parameters/Csrf' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              additionalProperties: false
+              properties:
+                content: { $ref: '#/components/schemas/ConfigContent' }
+                expectedUpdatedAt: { type: string, format: date-time, description: Reject with 409 if the draft changed since this timestamp }
+      responses:
+        '200': { description: "Saved draft" }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+  /apps/{appId}/configs/publish:
+    post:
+      tags: [Configurations]
+      summary: Publish the draft as a new immutable version
+      x-permission: config:publish
+      parameters: [{ $ref: '#/components/parameters/AppId' }, { $ref: '#/components/parameters/Csrf' }]
+      requestBody: { content: { application/json: { schema: { type: object, additionalProperties: false, properties: { changeNote: { type: string, maxLength: 500 } } } } } }
+      responses:
+        '200': { description: '`{ version, publishedAt, changeNote }`' }
+        '409': { description: "No changes compared to the published version" }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+  /apps/{appId}/configs/rollback:
+    post:
+      tags: [Configurations]
+      summary: Publish a new version with the content of an earlier version and reset the draft to it
+      x-permission: config:publish
+      parameters: [{ $ref: '#/components/parameters/AppId' }, { $ref: '#/components/parameters/Csrf' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [version], additionalProperties: false, properties: { version: { type: integer, minimum: 1 }, changeNote: { type: string, maxLength: 500 } } } } } }
+      responses:
+        '200': { description: '`{ version, rollbackOfVersion, publishedAt }`' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: "Target is already the current version" }
+
+  /public/apps/{appKey}/config:
+    get:
+      tags: [Public]
+      summary: Public, read-only configuration for client apps
+      description: |
+        Returns only the approved public projection of the latest published version plus enabled
+        feature flag rules. Supports `If-None-Match` (304). Cache-Control `public, max-age=60`.
+        CORS `*`, no credentials. Inactive/archived/unknown apps return 404.
+      security: []
+      parameters:
+        - { name: appKey, in: path, required: true, schema: { type: string, pattern: '^app_[A-Za-z0-9]{10,64}$' } }
+        - { name: platform, in: query, description: Filters platform-specific flags, schema: { $ref: '#/components/schemas/Platform' } }
+        - { name: If-None-Match, in: header, schema: { type: string } }
+      responses:
+        '200':
+          description: Public configuration
+          headers:
+            ETag: { schema: { type: string } }
+            Cache-Control: { schema: { type: string } }
+          content: { application/json: { schema: { $ref: '#/components/schemas/PublicConfig' } } }
+        '304': { description: "Not modified" }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /apps/{appId}/features:
+    parameters: [{ $ref: '#/components/parameters/AppId' }]
+    get:
+      tags: [Feature flags]
+      summary: List flags
+      x-permission: flags:read
+      parameters: [{ name: search, in: query, schema: { type: string } }, { name: enabled, in: query, schema: { type: string, enum: ['true', 'false'] } }]
+      responses:
+        '200': { description: "Flags" }
+    post:
+      tags: [Feature flags]
+      summary: Create a flag (live immediately)
+      x-permission: flags:write
+      parameters: [{ $ref: '#/components/parameters/Csrf' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/FeatureFlagCreate' } } } }
+      responses:
+        '201': { description: "Created" }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+  /apps/{appId}/features/{key}:
+    parameters: [{ $ref: '#/components/parameters/AppId' }, { name: key, in: path, required: true, schema: { type: string } }]
+    patch:
+      tags: [Feature flags]
+      summary: Update a flag (audited with before/after)
+      x-permission: flags:write
+      parameters: [{ $ref: '#/components/parameters/Csrf' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/FeatureFlagUpdate' } } } }
+      responses:
+        '200': { description: "Updated" }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Feature flags]
+      summary: Delete a flag
+      x-permission: flags:write
+      parameters: [{ $ref: '#/components/parameters/Csrf' }]
+      responses:
+        '200': { description: "Deleted" }
+
+  /apps/{appId}/users:
+    get:
+      tags: [App users]
+      summary: App-user registry (separate from the app's own user database)
+      x-permission: users:read
+      parameters:
+        - { $ref: '#/components/parameters/AppId' }
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/PageSize' }
+        - { name: search, in: query, description: "Prefix of email, externalUserId or name", schema: { type: string } }
+        - { name: status, in: query, schema: { type: string, enum: [active, suspended] } }
+        - { name: platform, in: query, schema: { $ref: '#/components/schemas/Platform' } }
+        - { name: appVersion, in: query, schema: { type: string } }
+        - { name: sort, in: query, schema: { type: string, enum: [createdAt, -createdAt, lastSeenAt, -lastSeenAt, email, -email], default: -createdAt } }
+      responses:
+        '200': { description: "Page of users (push tokens are never returned, only counts)", content: { application/json: { schema: { $ref: '#/components/schemas/PagedEnvelope' } } } }
+  /apps/{appId}/users/{userId}:
+    get:
+      tags: [App users]
+      summary: User details with recent activity
+      x-permission: users:read
+      parameters: [{ $ref: '#/components/parameters/AppId' }, { name: userId, in: path, required: true, schema: { $ref: '#/components/schemas/ObjectId' } }]
+      responses:
+        '200': { description: "User" }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /apps/{appId}/users/{userId}/activity:
+    get:
+      tags: [App users]
+      summary: Paginated activity events
+      x-permission: users:read
+      parameters: [{ $ref: '#/components/parameters/AppId' }, { name: userId, in: path, required: true, schema: { $ref: '#/components/schemas/ObjectId' } }, { $ref: '#/components/parameters/Page' }, { $ref: '#/components/parameters/PageSize' }]
+      responses:
+        '200': { description: "Events" }
+  /apps/{appId}/users/{userId}/status:
+    patch:
+      tags: [App users]
+      summary: Suspend or reactivate. Delivered to the app backend via signed webhook when configured.
+      x-permission: users:write
+      parameters: [{ $ref: '#/components/parameters/AppId' }, { $ref: '#/components/parameters/Csrf' }, { name: userId, in: path, required: true, schema: { $ref: '#/components/schemas/ObjectId' } }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [status], additionalProperties: false, properties: { status: { type: string, enum: [active, suspended] }, reason: { type: string, maxLength: 500 } } } } } }
+      responses:
+        '200': { description: '`{ user, propagation: { attempted, delivered, httpStatus, error } }`' }
+        '409': { description: "Already in that status" }
+
+  /ingest/apps/{appKey}/users/{externalUserId}:
+    parameters:
+      - { name: appKey, in: path, required: true, schema: { type: string } }
+      - { name: externalUserId, in: path, required: true, schema: { type: string, pattern: '^[A-Za-z0-9_.:@|-]{1,128}$' } }
+    put:
+      tags: [Ingest]
+      summary: Upsert a user by external id (from the app's backend)
+      security: [{ apiKeyAuth: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IngestUser' } } } }
+      responses:
+        '200': { description: "Updated" }
+        '201': { description: "Created" }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { description: "Key not valid for this app / app archived" }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+    delete:
+      tags: [Ingest]
+      summary: Erase a user and their events (e.g. account deletion requests)
+      security: [{ apiKeyAuth: [] }]
+      responses:
+        '200': { description: '`{ deleted: true, deletedEvents }`' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /ingest/apps/{appKey}/users/{externalUserId}/status:
+    get:
+      tags: [Ingest]
+      summary: Registry status for server-side enforcement (e.g. suspended)
+      security: [{ apiKeyAuth: [] }]
+      parameters:
+        - { name: appKey, in: path, required: true, schema: { type: string } }
+        - { name: externalUserId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: '`{ externalUserId, status, reason, changedAt }`' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /ingest/apps/{appKey}/events:
+    post:
+      tags: [Ingest]
+      summary: Record up to 500 activity events (drives active users and last-seen)
+      security: [{ apiKeyAuth: [] }]
+      parameters: [{ name: appKey, in: path, required: true, schema: { type: string } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [events]
+              properties:
+                events:
+                  type: array
+                  maxItems: 500
+                  items:
+                    type: object
+                    required: [externalUserId, type, occurredAt]
+                    properties:
+                      externalUserId: { type: string }
+                      type: { type: string, pattern: '^[a-z][a-z0-9_.]{0,63}$' }
+                      occurredAt: { type: string, format: date-time }
+                      platform: { $ref: '#/components/schemas/Platform' }
+                      appVersion: { type: string }
+                      properties: { type: object, additionalProperties: { type: [string, number, boolean, 'null'] } }
+      responses:
+        '200': { description: '`{ accepted, rejected, unknownUsers[] }`' }
+
+  /apps/{appId}/campaigns:
+    parameters: [{ $ref: '#/components/parameters/AppId' }]
+    get:
+      tags: [Campaigns]
+      summary: Campaign history
+      x-permission: campaigns:read
+      parameters:
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/PageSize' }
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/CampaignStatus' } }
+        - { name: search, in: query, schema: { type: string } }
+      responses:
+        '200': { description: "Page of campaigns", content: { application/json: { schema: { $ref: '#/components/schemas/PagedEnvelope' } } } }
+    post:
+      tags: [Campaigns]
+      summary: Create a draft, or schedule immediately when scheduledAt is given (requires FCM)
+      x-permission: campaigns:write
+      parameters:
+        - { $ref: '#/components/parameters/Csrf' }
+        - { name: Idempotency-Key, in: header, description: "Replays return the original campaign with `Idempotent-Replayed: true`", schema: { type: string, minLength: 8, maxLength: 128 } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CampaignCreate' } } } }
+      responses:
+        '200': { description: "Idempotent replay" }
+        '201': { description: "Created" }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '503': { description: "FCM not configured" }
+  /apps/{appId}/campaigns/audience-estimate:
+    post:
+      tags: [Campaigns]
+      summary: Count eligible recipients (active, opted in, with a token)
+      x-permission: campaigns:read
+      parameters: [{ $ref: '#/components/parameters/AppId' }, { $ref: '#/components/parameters/Csrf' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [audience], properties: { audience: { $ref: '#/components/schemas/Audience' } } } } } }
+      responses:
+        '200': { description: '`{ eligibleUsers, totalUsers }`' }
+  /apps/{appId}/campaigns/{campaignId}:
+    parameters: [{ $ref: '#/components/parameters/AppId' }, { $ref: '#/components/parameters/CampaignId' }]
+    get:
+      tags: [Campaigns]
+      summary: Campaign with delivery stats and error summary
+      x-permission: campaigns:read
+      responses:
+        '200': { description: "Campaign" }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Campaigns]
+      summary: Edit a draft
+      x-permission: campaigns:write
+      parameters: [{ $ref: '#/components/parameters/Csrf' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses:
+        '200': { description: "Updated" }
+        '409': { description: "Not a draft" }
+  /apps/{appId}/campaigns/{campaignId}/schedule:
+    post:
+      tags: [Campaigns]
+      summary: Schedule a draft (omit scheduledAt to send now)
+      x-permission: campaigns:write
+      parameters: [{ $ref: '#/components/parameters/AppId' }, { $ref: '#/components/parameters/CampaignId' }, { $ref: '#/components/parameters/Csrf' }]
+      requestBody: { content: { application/json: { schema: { type: object, properties: { scheduledAt: { type: string, format: date-time } } } } } }
+      responses:
+        '200': { description: "Scheduled" }
+        '409': { description: "Not draft/scheduled" }
+        '503': { description: "FCM not configured" }
+  /apps/{appId}/campaigns/{campaignId}/cancel:
+    post:
+      tags: [Campaigns]
+      summary: Cancel a draft or scheduled campaign
+      x-permission: campaigns:write
+      parameters: [{ $ref: '#/components/parameters/AppId' }, { $ref: '#/components/parameters/CampaignId' }, { $ref: '#/components/parameters/Csrf' }]
+      responses:
+        '200': { description: "Cancelled" }
+        '409': { description: "Already sending/sent" }
+
+  /apps/{appId}/releases:
+    parameters: [{ $ref: '#/components/parameters/AppId' }]
+    get:
+      tags: [Releases]
+      summary: Release history
+      x-permission: releases:read
+      parameters:
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/PageSize' }
+        - { name: platform, in: query, schema: { $ref: '#/components/schemas/Platform' } }
+        - { name: status, in: query, schema: { type: string, enum: [planned, in_review, rolling_out, released, halted] } }
+      responses:
+        '200': { description: "Page of releases", content: { application/json: { schema: { $ref: '#/components/schemas/PagedEnvelope' } } } }
+    post:
+      tags: [Releases]
+      summary: Record release metadata (does not upload or distribute binaries)
+      x-permission: releases:write
+      parameters: [{ $ref: '#/components/parameters/Csrf' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReleaseCreate' } } } }
+      responses:
+        '201': { description: "Created" }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /apps/{appId}/releases/summary:
+    get:
+      tags: [Releases]
+      summary: Published and draft update policy plus latest released version per platform
+      x-permission: releases:read
+      parameters: [{ $ref: '#/components/parameters/AppId' }]
+      responses:
+        '200': { description: "Summary" }
+  /apps/{appId}/releases/{releaseId}:
+    patch:
+      tags: [Releases]
+      summary: Update status, rollout, notes, mandatory flag or store URL
+      x-permission: releases:write
+      parameters: [{ $ref: '#/components/parameters/AppId' }, { $ref: '#/components/parameters/Csrf' }, { name: releaseId, in: path, required: true, schema: { $ref: '#/components/schemas/ObjectId' } }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses:
+        '200': { description: "Updated" }
+  /apps/{appId}/releases/{releaseId}/apply-to-draft:
+    post:
+      tags: [Releases]
+      summary: Copy a release into the draft update policy (publish separately)
+      x-permission: releases:write + config:write
+      parameters: [{ $ref: '#/components/parameters/AppId' }, { $ref: '#/components/parameters/Csrf' }, { name: releaseId, in: path, required: true, schema: { $ref: '#/components/schemas/ObjectId' } }]
+      responses:
+        '200': { description: '`{ draftUpdatePolicy }`' }
+
+  /apps/{appId}/analytics:
+    get:
+      tags: [Analytics]
+      summary: Per-app analytics from stored data only; each section reports `available`
+      x-permission: analytics:read
+      parameters: [{ $ref: '#/components/parameters/AppId' }, { name: days, in: query, schema: { type: integer, minimum: 1, maximum: 365, default: 30 } }]
+      responses:
+        '200': { description: '`{ range, users, activity, versions, api, campaigns }`' }
+
+  /apps/{appId}/audit-logs:
+    get:
+      tags: [Audit logs]
+      summary: App audit trail
+      x-permission: audit:read
+      parameters:
+        - { $ref: '#/components/parameters/AppId' }
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/PageSize' }
+        - { name: action, in: query, schema: { type: string } }
+        - { name: actorEmail, in: query, schema: { type: string } }
+        - { name: targetType, in: query, schema: { type: string } }
+        - { name: from, in: query, schema: { type: string, format: date-time } }
+        - { name: to, in: query, schema: { type: string, format: date-time } }
+      responses:
+        '200': { description: "Page of audit entries", content: { application/json: { schema: { $ref: '#/components/schemas/PagedEnvelope' } } } }
+
+  /apps/{appId}/integrations:
+    get:
+      tags: [Integrations]
+      summary: FCM, webhook and API key status (secrets are never returned)
+      x-permission: integrations:read
+      parameters: [{ $ref: '#/components/parameters/AppId' }]
+      responses:
+        '200': { description: '`{ fcm, webhook, apiKeys[], storage }`' }
+  /apps/{appId}/integrations/fcm:
+    parameters: [{ $ref: '#/components/parameters/AppId' }]
+    put:
+      tags: [Integrations]
+      summary: Store the Firebase service account (AES-256-GCM encrypted at rest)
+      x-permission: integrations:write
+      parameters: [{ $ref: '#/components/parameters/Csrf' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [serviceAccountJson], properties: { serviceAccountJson: { type: string } } } } } }
+      responses:
+        '200': { description: "Configured (projectId and clientEmail only)" }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+    delete:
+      tags: [Integrations]
+      summary: Remove FCM credentials
+      x-permission: integrations:write
+      parameters: [{ $ref: '#/components/parameters/Csrf' }]
+      responses:
+        '200': { description: "Removed" }
+  /apps/{appId}/integrations/fcm/test:
+    post:
+      tags: [Integrations]
+      summary: Verify the credentials by obtaining a Google access token
+      x-permission: integrations:write
+      parameters: [{ $ref: '#/components/parameters/AppId' }, { $ref: '#/components/parameters/Csrf' }]
+      responses:
+        '200': { description: "Valid" }
+        '502': { description: "Firebase rejected the credentials" }
+        '503': { description: "Not configured" }
+  /apps/{appId}/integrations/api-keys:
+    post:
+      tags: [Integrations]
+      summary: Create a server API key (plaintext returned once; stored hashed)
+      x-permission: integrations:write
+      parameters: [{ $ref: '#/components/parameters/AppId' }, { $ref: '#/components/parameters/Csrf' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [name], properties: { name: { type: string } } } } } }
+      responses:
+        '201': { description: '`{ …integration, apiKey }`' }
+  /apps/{appId}/integrations/api-keys/{integrationId}:
+    delete:
+      tags: [Integrations]
+      summary: Revoke an API key
+      x-permission: integrations:write
+      parameters: [{ $ref: '#/components/parameters/AppId' }, { $ref: '#/components/parameters/Csrf' }, { name: integrationId, in: path, required: true, schema: { $ref: '#/components/schemas/ObjectId' } }]
+      responses:
+        '200': { description: "Revoked" }
+  /apps/{appId}/integrations/webhook:
+    parameters: [{ $ref: '#/components/parameters/AppId' }]
+    put:
+      tags: [Integrations]
+      summary: Configure the app-backend webhook (https; signing secret returned once)
+      description: 'Requests carry `X-AMP-Event` and `X-AMP-Signature: t=<unix>,v1=<hex HMAC-SHA256(secret, "<t>.<body>")>`.'
+      x-permission: integrations:write
+      parameters: [{ $ref: '#/components/parameters/Csrf' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [url], properties: { url: { type: string, format: uri } } } } } }
+      responses:
+        '201': { description: '`{ …integration, signingSecret }`' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+    delete:
+      tags: [Integrations]
+      summary: Remove the webhook
+      x-permission: integrations:write
+      parameters: [{ $ref: '#/components/parameters/Csrf' }]
+      responses:
+        '200': { description: "Removed" }
+  /apps/{appId}/integrations/webhook/test:
+    post:
+      tags: [Integrations]
+      summary: Send a signed `ping` event
+      x-permission: integrations:write
+      parameters: [{ $ref: '#/components/parameters/AppId' }, { $ref: '#/components/parameters/Csrf' }]
+      responses:
+        '200': { description: '`{ ok, status, error? }`' }
+        '503': { description: "Not configured" }
+
+components:
+  securitySchemes:
+    cookieAuth: { type: apiKey, in: cookie, name: amp_at, description: 'Session cookie; unsafe methods also require X-CSRF-Token' }
+    refreshCookie: { type: apiKey, in: cookie, name: amp_rt }
+    apiKeyAuth: { type: http, scheme: bearer, description: 'Per-app server API key (amk_…). Server-to-server only; never embed in apps.' }
+  parameters:
+    Csrf: { name: X-CSRF-Token, in: header, required: true, schema: { type: string } }
+    Page: { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+    PageSize: { name: pageSize, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+    OrgId: { name: orgId, in: path, required: true, schema: { $ref: '#/components/schemas/ObjectId' } }
+    AppId: { name: appId, in: path, required: true, schema: { $ref: '#/components/schemas/ObjectId' } }
+    CampaignId: { name: campaignId, in: path, required: true, schema: { $ref: '#/components/schemas/ObjectId' } }
+  responses:
+    Unauthenticated: { description: "Missing, invalid or expired session / API key", content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } } }
+    CsrfFailed: { description: "Missing or invalid CSRF token", content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } } }
+    Forbidden: { description: "Accessible resource but insufficient permission", content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } } }
+    NotFound: { description: "Not found or not accessible to the caller", content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } } }
+    Conflict: { description: "Conflict (duplicate or invalid state transition)", content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } } }
+    ValidationFailed: { description: "Validation failed; `details` lists `{ path, message }`", content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } } }
+    RateLimited: { description: "Too many requests", content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } } }
+  schemas:
+    ObjectId: { type: string, pattern: '^[a-f0-9]{24}$' }
+    Slug: { type: string, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$', maxLength: 64 }
+    Platform: { type: string, enum: [android, ios] }
+    Environment: { type: string, enum: [development, staging, production] }
+    AppStatus: { type: string, enum: [active, inactive, archived] }
+    OrgRole: { type: string, enum: [owner, app_admin, support_agent] }
+    CampaignStatus: { type: string, enum: [draft, scheduled, sending, sent, partially_failed, failed, cancelled] }
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string, enum: [bad_request, validation_failed, unauthenticated, session_expired, csrf_failed, forbidden, not_found, conflict, account_locked, rate_limited, payload_too_large, not_configured, upstream_failed, internal_error] }
+        message: { type: string }
+        details: {}
+        requestId: { type: string }
+    ErrorEnvelope: { type: object, properties: { error: { $ref: '#/components/schemas/Error' } } }
+    PageMeta:
+      type: object
+      properties: { page: { type: integer }, pageSize: { type: integer }, total: { type: integer }, totalPages: { type: integer } }
+    PagedEnvelope:
+      type: object
+      properties: { data: { type: array, items: { type: object } }, meta: { $ref: '#/components/schemas/PageMeta' } }
+    HealthEnvelope:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            status: { type: string, enum: [ok, degraded] }
+            version: { type: string }
+            uptimeSeconds: { type: integer }
+            checks: { type: object, properties: { database: { type: string } } }
+    LoginRequest:
+      type: object
+      required: [email, password]
+      additionalProperties: false
+      properties: { email: { type: string, format: email }, password: { type: string } }
+    ProfileEnvelope:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            csrfToken: { type: string }
+            admin: { type: object, properties: { id: { type: string }, email: { type: string }, name: { type: string }, isSuperAdmin: { type: boolean } } }
+            organizations:
+              type: array
+              items:
+                type: object
+                properties:
+                  id: { type: string }
+                  name: { type: string }
+                  slug: { type: string }
+                  role: { type: string, enum: [super_admin, owner, app_admin, support_agent] }
+                  appIds: { type: array, items: { type: string } }
+                  permissions: { type: array, items: { type: string } }
+    SessionInfo:
+      type: object
+      properties: { id: { type: string }, ip: { type: string }, userAgent: { type: string }, createdAt: { type: string }, lastUsedAt: { type: string }, expiresAt: { type: string }, current: { type: boolean } }
+    App:
+      type: object
+      properties:
+        id: { $ref: '#/components/schemas/ObjectId' }
+        orgId: { $ref: '#/components/schemas/ObjectId' }
+        name: { type: string }
+        slug: { type: string }
+        appKey: { type: string, description: Public identifier used by the SDK; not a secret }
+        description: { type: string }
+        platforms: { type: array, items: { $ref: '#/components/schemas/Platform' } }
+        androidPackageId: { type: [string, 'null'] }
+        iosBundleId: { type: [string, 'null'] }
+        environment: { $ref: '#/components/schemas/Environment' }
+        status: { $ref: '#/components/schemas/AppStatus' }
+        iconUrl: { type: [string, 'null'] }
+        publishedConfigVersion: { type: [integer, 'null'] }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    AppCreate:
+      type: object
+      required: [orgId, name, platforms]
+      additionalProperties: false
+      properties:
+        orgId: { $ref: '#/components/schemas/ObjectId' }
+        name: { type: string, minLength: 2, maxLength: 120 }
+        slug: { $ref: '#/components/schemas/Slug' }
+        description: { type: string, maxLength: 1000 }
+        platforms: { type: array, minItems: 1, items: { $ref: '#/components/schemas/Platform' } }
+        androidPackageId: { type: [string, 'null'], description: Required when android is a platform }
+        iosBundleId: { type: [string, 'null'], description: Required when ios is a platform }
+        environment: { $ref: '#/components/schemas/Environment' }
+        iconUrl: { type: [string, 'null'], format: uri }
+    AppUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name: { type: string }
+        slug: { $ref: '#/components/schemas/Slug' }
+        description: { type: string }
+        platforms: { type: array, items: { $ref: '#/components/schemas/Platform' } }
+        androidPackageId: { type: [string, 'null'] }
+        iosBundleId: { type: [string, 'null'] }
+        environment: { $ref: '#/components/schemas/Environment' }
+        iconUrl: { type: [string, 'null'] }
+    Color: { type: string, pattern: '^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$' }
+    Palette:
+      type: object
+      additionalProperties: false
+      required: [primary, secondary, background, surface, error]
+      properties:
+        primary: { $ref: '#/components/schemas/Color' }
+        secondary: { $ref: '#/components/schemas/Color' }
+        background: { $ref: '#/components/schemas/Color' }
+        surface: { $ref: '#/components/schemas/Color' }
+        error: { $ref: '#/components/schemas/Color' }
+    PlatformPolicy:
+      type: object
+      additionalProperties: false
+      properties:
+        minimumVersion: { type: [string, 'null'], description: semver }
+        latestVersion: { type: [string, 'null'] }
+        updateUrl: { type: [string, 'null'], format: uri }
+    ConfigContent:
+      type: object
+      additionalProperties: false
+      required: [branding, theme, maintenance, updatePolicy, banners, onboarding, strings, internalNotes]
+      properties:
+        branding: { type: object, properties: { appTitle: { type: string, maxLength: 80 }, logoUrl: { type: [string, 'null'] } } }
+        theme:
+          type: object
+          properties:
+            defaultMode: { type: string, enum: [system, light, dark] }
+            darkModeEnabled: { type: boolean }
+            light: { $ref: '#/components/schemas/Palette' }
+            dark: { $ref: '#/components/schemas/Palette' }
+        maintenance: { type: object, properties: { enabled: { type: boolean }, title: { type: string }, message: { type: string }, estimatedEndAt: { type: [string, 'null'], format: date-time } } }
+        updatePolicy: { type: object, properties: { android: { $ref: '#/components/schemas/PlatformPolicy' }, ios: { $ref: '#/components/schemas/PlatformPolicy' }, message: { type: string } } }
+        banners:
+          type: array
+          maxItems: 20
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              title: { type: string }
+              subtitle: { type: [string, 'null'] }
+              imageUrl: { type: [string, 'null'] }
+              actionUrl: { type: [string, 'null'] }
+              active: { type: boolean }
+              priority: { type: integer, minimum: 0, maximum: 1000 }
+              startsAt: { type: [string, 'null'], format: date-time }
+              endsAt: { type: [string, 'null'], format: date-time }
+        onboarding: { type: object, properties: { enabled: { type: boolean }, pages: { type: array, maxItems: 10, items: { type: object, properties: { title: { type: string }, body: { type: string }, imageUrl: { type: [string, 'null'] } } } } } }
+        strings: { type: object, additionalProperties: { type: string } }
+        internalNotes: { type: string, description: Dashboard-only; never exposed publicly }
+    PublicConfig:
+      type: object
+      properties:
+        schemaVersion: { type: integer, const: 1 }
+        appKey: { type: string }
+        configVersion: { type: integer }
+        publishedAt: { type: string, format: date-time }
+        config: { description: 'ConfigContent without internalNotes; inactive/expired banners removed', type: object }
+        features:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              enabled: { type: boolean, const: true }
+              rolloutPercentage: { type: integer }
+              platforms: { type: array, items: { $ref: '#/components/schemas/Platform' } }
+              minAppVersion: { type: [string, 'null'] }
+    FeatureFlagCreate:
+      type: object
+      required: [key]
+      additionalProperties: false
+      properties:
+        key: { type: string, pattern: '^[a-z][a-z0-9_.-]{0,63}$' }
+        description: { type: string }
+        enabled: { type: boolean, default: false }
+        rolloutPercentage: { type: integer, minimum: 0, maximum: 100, default: 100 }
+        platforms: { type: array, items: { $ref: '#/components/schemas/Platform' } }
+        minAppVersion: { type: [string, 'null'] }
+    FeatureFlagUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        description: { type: string }
+        enabled: { type: boolean }
+        rolloutPercentage: { type: integer, minimum: 0, maximum: 100 }
+        platforms: { type: array, items: { $ref: '#/components/schemas/Platform' } }
+        minAppVersion: { type: [string, 'null'] }
+    IngestUser:
+      type: object
+      additionalProperties: false
+      properties:
+        email: { type: [string, 'null'], format: email }
+        displayName: { type: [string, 'null'] }
+        platform: { oneOf: [{ $ref: '#/components/schemas/Platform' }, { type: 'null' }] }
+        appVersion: { type: [string, 'null'] }
+        locale: { type: [string, 'null'] }
+        pushOptIn: { type: boolean }
+        pushTokens: { type: array, maxItems: 10, description: Replaces the full token set, items: { type: object, properties: { token: { type: string }, platform: { $ref: '#/components/schemas/Platform' } } } }
+        attributes: { type: object, additionalProperties: { type: [string, number, boolean, 'null'] } }
+        lastSeenAt: { type: string, format: date-time }
+    Audience:
+      oneOf:
+        - { type: object, required: [type], properties: { type: { const: all } } }
+        - { type: object, required: [type, platforms], properties: { type: { const: platform }, platforms: { type: array, items: { $ref: '#/components/schemas/Platform' } } } }
+        - { type: object, required: [type, activeWithinDays], properties: { type: { const: active_recently }, activeWithinDays: { type: integer, minimum: 1, maximum: 365 } } }
+        - { type: object, required: [type, externalUserIds], properties: { type: { const: users }, externalUserIds: { type: array, maxItems: 1000, items: { type: string } } } }
+    CampaignCreate:
+      type: object
+      required: [name, title, body, audience]
+      additionalProperties: false
+      properties:
+        name: { type: string, maxLength: 120 }
+        title: { type: string, maxLength: 120 }
+        body: { type: string, maxLength: 1000 }
+        imageUrl: { type: [string, 'null'], format: uri }
+        data: { type: object, additionalProperties: { type: string }, maxProperties: 20 }
+        audience: { $ref: '#/components/schemas/Audience' }
+        scheduledAt: { type: string, format: date-time }
+    ReleaseCreate:
+      type: object
+      required: [platform, version, buildNumber]
+      additionalProperties: false
+      properties:
+        platform: { $ref: '#/components/schemas/Platform' }
+        version: { type: string, description: semver }
+        buildNumber: { type: integer, minimum: 0 }
+        releaseNotes: { type: string }
+        status: { type: string, enum: [planned, in_review, rolling_out, released, halted] }
+        rolloutPercentage: { type: number, minimum: 0, maximum: 100 }
+        isMandatory: { type: boolean }
+        storeUrl: { type: [string, 'null'], format: uri }

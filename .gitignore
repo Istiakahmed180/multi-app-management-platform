@@ -1,0 +1,25 @@
+# Secrets
+.env
+.env.*
+!.env.example
+infra/.env
+
+# Node
+node_modules/
+backend/dist/
+backend/coverage/
+
+# Flutter / Dart
+.dart_tool/
+.packages
+build/
+**/pubspec_overrides.yaml
+dashboard/.flutter-plugins
+dashboard/.flutter-plugins-dependencies
+packages/app_management_sdk/pubspec.lock
+
+# Editors / OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
