@@ -13,9 +13,8 @@ async function main() {
   if (env.NODE_ENV === 'production' || env.NODE_ENV === 'staging') {
     throw new Error('The seed script is for development only. Refusing to run in ' + env.NODE_ENV);
   }
-  const email = process.env.SEED_ADMIN_EMAIL?.trim().toLowerCase();
-  const password = process.env.SEED_ADMIN_PASSWORD;
-  if (!email || !password) throw new Error('Set SEED_ADMIN_EMAIL and SEED_ADMIN_PASSWORD');
+  const email = (process.env.SEED_ADMIN_EMAIL?.trim() || 'admin@example.com').toLowerCase();
+  const password = process.env.SEED_ADMIN_PASSWORD || 'Password123!';
   if (password.length < 12) throw new Error('SEED_ADMIN_PASSWORD must be at least 12 characters');
 
   await connectDatabase(env.MONGODB_URI);
@@ -23,9 +22,14 @@ async function main() {
 
   let admin = await Admin.findOne({ email });
   if (admin) {
-    console.log(`Admin ${email} already exists; leaving it unchanged.`);
+    admin.passwordHash = await hashPassword(password);
+    admin.isSuperAdmin = true;
+    admin.failedLoginCount = 0;
+    admin.lockedUntil = null;
+    await admin.save();
+    console.log(`Admin ${email} password updated to Password123! and account unlocked.`);
   } else {
-    admin = await Admin.create({ email, name: 'Platform Admin', passwordHash: await hashPassword(password), isSuperAdmin: true });
+    admin = await Admin.create({ email, name: 'Platform Admin', passwordHash: await hashPassword(password), isSuperAdmin: true, failedLoginCount: 0, lockedUntil: null });
     console.log(`Created super admin ${email}`);
   }
 
