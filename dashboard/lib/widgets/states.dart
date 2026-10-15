@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:get/get.dart';
 
 class LoadingView extends StatelessWidget {
   const LoadingView({super.key, this.label});
@@ -76,7 +77,13 @@ class ErrorState extends StatelessWidget {
   }
 }
 
+// Read inside every content builder so `Obx` always has a dependency and never throws.
+final _contentTick = 0.obs;
+
 /// Renders loading/error/content for a controller's async state.
+///
+/// The content builder runs inside its own `Obx`, so observables read while
+/// building the content (e.g. toggles in a form) rebuild it when they change.
 class AsyncBody extends StatelessWidget {
   const AsyncBody({super.key, required this.loading, required this.error, required this.onRetry, required this.builder});
 
@@ -89,6 +96,9 @@ class AsyncBody extends StatelessWidget {
   Widget build(BuildContext context) {
     if (error != null) return ErrorState(message: error!, onRetry: onRetry);
     if (loading) return const LoadingView();
-    return builder(context);
+    return Obx(() {
+      _contentTick.value;
+      return builder(context);
+    });
   }
 }

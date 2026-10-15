@@ -19,6 +19,18 @@ A multi-tenant platform for managing many Flutter apps from one Flutter Web dash
 | [`infra/`](infra) | Docker Compose (MongoDB, API, dashboard and nginx, optional MinIO). |
 | [`docs/`](docs) | [Architecture](docs/ARCHITECTURE.md) · [API guide](docs/API.md) · [OpenAPI](docs/openapi.yaml) · [Database](docs/DATABASE.md) · [Deployment](docs/DEPLOYMENT.md) · [Checklist and status](docs/CHECKLIST.md) |
 
+## Quickest start (no Docker)
+
+Requires Node 22+, Flutter and Python 3. A local MongoDB is started automatically.
+
+```bash
+./run-local.sh            # starts MongoDB + API + dashboard; Ctrl+C stops all
+./run-local.sh --fresh    # same, but wipes local data first
+./run-local.sh stop       # stops leftovers from a previous run
+```
+
+It prints the dashboard URL (http://localhost:8080) and the dev login. Local data lives in `.local/` and is git-ignored.
+
 ## Quick start (Docker)
 
 Requires Docker with Compose v2.
