@@ -29,7 +29,14 @@ async function main() {
     await admin.save();
     console.log(`Admin ${email} password updated to Password123! and account unlocked.`);
   } else {
-    admin = await Admin.create({ email, name: 'Platform Admin', passwordHash: await hashPassword(password), isSuperAdmin: true, failedLoginCount: 0, lockedUntil: null });
+    admin = await Admin.create({
+      email,
+      name: 'Platform Admin',
+      passwordHash: await hashPassword(password),
+      isSuperAdmin: true,
+      failedLoginCount: 0,
+      lockedUntil: null,
+    });
     console.log(`Created super admin ${email}`);
   }
 

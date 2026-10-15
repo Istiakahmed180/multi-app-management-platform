@@ -1,7 +1,9 @@
 import type { ErrorRequestHandler, RequestHandler } from 'express';
 import mongoose from 'mongoose';
-import { AppError, isDuplicateKeyError } from '../errors.js';
+import { AppError, isDuplicateKeyError, type ErrorCode } from '../errors.js';
 import { captureException } from '../error-reporter.js';
+
+const EXPECTED_CODES: ReadonlySet<ErrorCode> = new Set(['not_configured']);
 
 export const notFoundHandler: RequestHandler = (_req, _res, next) => {
   next(new AppError('not_found', 'Route not found'));
@@ -35,7 +37,11 @@ function normalize(err: unknown): AppError {
 
 export const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
   const appErr = normalize(err);
-  if (appErr.status >= 500) {
+  // A missing integration is an expected, admin-fixable state: it keeps its honest 503
+  // status but is not reported, logged or counted as a server failure.
+  const expected = EXPECTED_CODES.has(appErr.code);
+  if (expected) res.locals.expectedError = true;
+  if (appErr.status >= 500 && !expected) {
     captureException(err, { requestId: req.ctx?.requestId, path: req.path, method: req.method });
   }
   if (res.headersSent) return;

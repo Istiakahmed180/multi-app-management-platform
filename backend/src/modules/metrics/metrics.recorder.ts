@@ -45,6 +45,7 @@ export class MetricsRecorder {
           route,
           method: req.method,
           status: res.statusCode,
+          expectedError: res.locals.expectedError === true,
           durationMs,
           appId: req.ctx?.metricsAppId ?? null,
           orgId: req.ctx?.tenant?.orgId ?? null,
@@ -58,6 +59,8 @@ export class MetricsRecorder {
     route: string;
     method: string;
     status: number;
+    /** Expected failures (e.g. integration not configured) count as client errors. */
+    expectedError?: boolean;
     durationMs: number;
     appId: Types.ObjectId | null;
     orgId: Types.ObjectId | null;
@@ -82,7 +85,7 @@ export class MetricsRecorder {
       this.buffer.set(key, agg);
     }
     agg.count += 1;
-    if (m.status >= 500) agg.serverErrors += 1;
+    if (m.status >= 500 && !m.expectedError) agg.serverErrors += 1;
     else if (m.status >= 400) agg.clientErrors += 1;
     agg.totalDurationMs += m.durationMs;
     agg.maxDurationMs = Math.max(agg.maxDurationMs, m.durationMs);

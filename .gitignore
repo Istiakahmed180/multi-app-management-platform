@@ -23,3 +23,6 @@ packages/app_management_sdk/pubspec.lock
 .vscode/
 *.iml
 .DS_Store
+
+# Local run data (dev only)
+.local/

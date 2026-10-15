@@ -9,6 +9,8 @@ declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace
   namespace Express {
     interface Locals {
+      /** Set by the error handler for expected, admin-fixable failures (see EXPECTED_CODES). */
+      expectedError?: boolean;
       ingest?: {
         appId: import('mongoose').Types.ObjectId;
         orgId: import('mongoose').Types.ObjectId;

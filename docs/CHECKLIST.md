@@ -9,7 +9,7 @@ Last verified: 2026-10-12. Toolchain: Node 26.5, TypeScript 7.0, Flutter 3.47.7 
 | Backend type check | `npm run typecheck` | ✅ no errors |
 | Backend format | `npm run format:check` | ✅ |
 | Backend build | `npm run build` | ✅ |
-| Backend tests | `npm test` | ✅ **162 passed** across 9 files (auth 16, tenancy/RBAC 17, apps 9, config 9, flags 2, campaigns 12, users/ingest 9, platform 14, OpenAPI contract 74) |
+| Backend tests | `npm test` | ✅ **163 passed** across 9 files (auth 16, tenancy/RBAC 17, apps 9, config 9, flags 2, campaigns 12, users/ingest 9, platform 15, OpenAPI contract 74) |
 | Dashboard analysis | `flutter analyze` | ✅ no issues |
 | Dashboard format | `dart format --set-exit-if-changed lib test` | ✅ |
 | Dashboard tests | `flutter test` | ✅ **26 passed** (API client and error mapping, auth states, routing guards, login widget flow, config parsing and diffing, responsive shell, table states) |

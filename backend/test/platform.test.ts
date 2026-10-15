@@ -253,3 +253,29 @@ describe('environment configuration', () => {
     expect(() => loadEnv({ NODE_ENV: 'production', MONGODB_URI: 'mongodb://x', ENCRYPTION_KEY: key })).toThrow(/CORS_ORIGINS/);
   });
 });
+
+describe('expected failures', () => {
+  it('counts "integration not configured" as a client-fixable error, not a server error', async () => {
+    const ctx = buildTestApp();
+    const admin = await createAdmin('owner@example.com');
+    const org = await createOrg('Acme', admin._id);
+    const s = await login(ctx.app, 'owner@example.com');
+    const app = await createAppVia(s, String(org._id));
+    const draft = await s.post(`/api/v1/apps/${app.id}/campaigns`, {
+      name: 'n',
+      title: 't',
+      body: 'b',
+      audience: { type: 'all' },
+    });
+    const res = await s.post(`/api/v1/apps/${app.id}/campaigns/${draft.body.data.id}/schedule`, {});
+    expect(res.status).toBe(503);
+    expect(res.body.error.code).toBe('not_configured');
+    await ctx.deps.metrics.flush();
+    const [totals] = await ApiMetric.aggregate([
+      { $match: { appId: new (await import('mongoose')).Types.ObjectId(app.id) } },
+      { $group: { _id: null, server: { $sum: '$serverErrors' }, client: { $sum: '$clientErrors' } } },
+    ]);
+    expect(totals.server).toBe(0);
+    expect(totals.client).toBe(1);
+  });
+});

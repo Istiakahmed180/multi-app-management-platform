@@ -44,6 +44,11 @@ export function createApp(deps: Deps): Express {
       logger,
       genReqId: (req) => (req as express.Request).ctx.requestId,
       autoLogging: { ignore: (req) => req.url?.startsWith('/api/v1/health') ?? false },
+      customLogLevel: (_req, res, err) => {
+        const expected = (res as express.Response).locals?.expectedError === true;
+        if ((res.statusCode >= 500 || err) && !expected) return 'error';
+        return res.statusCode >= 400 ? 'warn' : 'info';
+      },
       // Log route and status only; bodies and query strings may contain personal data.
       serializers: {
         req: (req: { id: string; method: string; url: string }) => ({
